@@ -1,0 +1,17 @@
+[package]
+name = "charlotte_core"
+description = "Charlotte renderer: scene types, materials, lights, camera and the Renderer trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+exclude = ["assets/environments/qwantani_dusk_2_puresky_4k.exr"]
+readme = "README.md"
+documentation = "https://docs.rs/charlotte_core"
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+log.workspace = true
+raw-window-handle.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tga", "hdr", "exr"] }

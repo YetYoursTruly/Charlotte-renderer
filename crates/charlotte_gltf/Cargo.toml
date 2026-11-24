@@ -1,0 +1,15 @@
+[package]
+name = "charlotte_gltf"
+description = "glTF 2.0 / GLB loader for Charlotte, including Blender-exported punctual lights"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/charlotte_gltf"
+
+[dependencies]
+anyhow.workspace = true
+charlotte_core.workspace = true
+glam.workspace = true
+log.workspace = true
+gltf = { version = "1.4", features = ["KHR_lights_punctual", "KHR_materials_emissive_strength"] }

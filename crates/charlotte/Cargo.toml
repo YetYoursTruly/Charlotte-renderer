@@ -1,0 +1,24 @@
+[package]
+name = "charlotte-renderer"
+description = "Charlotte: a Direct3D 12 first PBR + ray tracing renderer for Rust (beta)"
+version = "0.1.0-beta.2"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/charlotte-renderer"
+keywords = ["graphics", "renderer", "d3d12", "pbr"]
+categories = ["graphics", "rendering::engine"]
+
+[features]
+default = ["d3d12", "vulkan", "gltf"]
+d3d12 = ["dep:charlotte_d3d12"]
+vulkan = ["dep:charlotte_vulkan"]
+gltf = ["dep:charlotte_gltf"]
+
+[dependencies]
+charlotte_core.workspace = true
+charlotte_d3d12 = { workspace = true, optional = true }
+charlotte_vulkan = { workspace = true, optional = true }
+charlotte_gltf = { workspace = true, optional = true }
+anyhow.workspace = true
+log.workspace = true

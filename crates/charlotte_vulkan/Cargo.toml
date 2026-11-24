@@ -1,0 +1,15 @@
+[package]
+name = "charlotte_vulkan"
+description = "Experimental Vulkan 1.3 backend for Charlotte (device bring-up, swapchain, adapter selection)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/charlotte_vulkan"
+
+[dependencies]
+anyhow.workspace = true
+charlotte_core.workspace = true
+log.workspace = true
+ash = "0.38"
+ash-window = "0.13"

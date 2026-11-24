@@ -1,0 +1,14 @@
+[package]
+name = "viewer"
+description = "Charlotte demo viewer: glTF/GLB files, PBR texture folders, built-in demo scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+charlotte = { package = "charlotte-renderer", path = "../../crates/charlotte" }
+env_logger = "0.11"
+log.workspace = true
+winit = "0.30"

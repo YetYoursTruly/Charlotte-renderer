@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/charlotte_core",
+    "crates/charlotte_gltf",
+    "crates/charlotte_d3d12",
+    "crates/charlotte_vulkan",
+    "crates/charlotte",
+    "apps/viewer",
+]
+
+[workspace.package]
+version = "0.1.0-beta.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+log = "0.4"
+raw-window-handle = "0.6"
+
+charlotte_core = { path = "crates/charlotte_core", version = "0.1.0-beta.1" }
+charlotte_gltf = { path = "crates/charlotte_gltf", version = "0.1.0-beta.1" }
+charlotte_d3d12 = { path = "crates/charlotte_d3d12", version = "0.1.0-beta.2" }
+charlotte_vulkan = { path = "crates/charlotte_vulkan", version = "0.1.0-beta.1" }
+
+[profile.dev]
+opt-level = 1

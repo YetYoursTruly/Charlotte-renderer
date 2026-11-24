@@ -1,0 +1,26 @@
+[package]
+name = "charlotte_d3d12"
+description = "Direct3D 12 backend for Charlotte: PBR forward renderer with DXR 1.1 ray-traced shadows and AO"
+version = "0.1.0-beta.2"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/charlotte_d3d12"
+
+# Everything in this crate is Windows-only; on other targets it compiles to nothing.
+[target.'cfg(windows)'.dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+charlotte_core.workspace = true
+glam.workspace = true
+log.workspace = true
+hassle-rs = "0.11"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Threading",
+] }
