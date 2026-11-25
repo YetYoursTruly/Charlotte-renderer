@@ -5,7 +5,7 @@ members = [
     "crates/charlotte_gltf",
     "crates/charlotte_d3d12",
     "crates/charlotte_vulkan",
-    "crates/charlotte",
+    "crates/charlotte-renderer",
     "apps/viewer",
 ]
 

@@ -1,9 +1,9 @@
-//! Charlotte facade crate. Add `charlotte = { package = "charlotte-renderer", version = "0.1.0-beta.2" }`
+//! Charlotte facade crate. Add `charlotte-renderer = "0.1.0-beta.2"` to Cargo.toml.
 //! and pick a backend at runtime.
 //!
 //! ```ignore
-//! let scene = charlotte::gltf::load_gltf("model.glb")?;
-//! let mut renderer = charlotte::create_renderer(Backend::Auto, &handles, &settings)?;
+//! let scene = charlotte_renderer::gltf::load_gltf("model.glb")?;
+//! let mut renderer = charlotte_renderer::create_renderer(Backend::Auto, &handles, &settings)?;
 //! renderer.load_scene(&scene)?;
 //! loop { renderer.render(&camera, &settings)?; }
 //! ```

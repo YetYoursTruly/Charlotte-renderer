@@ -23,6 +23,47 @@ pub struct MeshData {
 }
 
 impl MeshData {
+    /// Displaces existing vertices along their normals from a linear height image.
+    /// Mesh density is unchanged; subdivide the mesh first for fine detail.
+    pub fn displace_from_height(&mut self, image: &ImageData, scale: f32) {
+        if image.width == 0 || image.height == 0 || scale == 0.0 {
+            return;
+        }
+        let sample = |uv: [f32; 2]| {
+            let x = (uv[0].rem_euclid(1.0) * (image.width - 1) as f32).round() as u32;
+            let y = (uv[1].rem_euclid(1.0) * (image.height - 1) as f32).round() as u32;
+            let i = ((y * image.width + x) * 4) as usize;
+            (image.rgba8[i] as f32 / 255.0) * 0.2126
+                + (image.rgba8[i + 1] as f32 / 255.0) * 0.7152
+                + (image.rgba8[i + 2] as f32 / 255.0) * 0.0722
+        };
+        for vertex in &mut self.vertices {
+            let height = sample(vertex.uv) - 0.5;
+            let normal = Vec3::from(vertex.normal).normalize_or_zero();
+            let position = Vec3::from(vertex.position) + normal * height * scale;
+            vertex.position = position.to_array();
+        }
+        let mut normals = vec![Vec3::ZERO; self.vertices.len()];
+        for tri in self.indices.chunks_exact(3) {
+            let a = tri[0] as usize;
+            let b = tri[1] as usize;
+            let c = tri[2] as usize;
+            let p0 = Vec3::from(self.vertices[a].position);
+            let p1 = Vec3::from(self.vertices[b].position);
+            let p2 = Vec3::from(self.vertices[c].position);
+            let n = (p1 - p0).cross(p2 - p0);
+            normals[a] += n;
+            normals[b] += n;
+            normals[c] += n;
+        }
+        for (vertex, normal) in self.vertices.iter_mut().zip(normals) {
+            if normal.length_squared() > 1e-12 {
+                vertex.normal = normal.normalize().to_array();
+            }
+        }
+        self.compute_tangents();
+    }
+
     /// Replaces the mesh with an un-indexed copy that has flat face normals.
     pub fn make_flat_normals(&mut self) {
         let mut out = Vec::with_capacity(self.indices.len());
@@ -217,8 +258,19 @@ pub enum AlphaMode {
     Opaque,
     /// Pixels below `alpha_cutoff` are discarded.
     Mask,
-    /// Currently rendered like `Mask` (no sorted transparency yet).
+    /// Alpha blended with back-to-front sorting on backends that support transparency.
     Blend,
+    /// Screen-door coverage for stable, depth-writing fades without sorting.
+    Dithered,
+}
+
+/// One geometry level in a mesh LOD chain. Levels are ordered from finest to
+/// coarsest; `min_screen_fraction` selects the first level whose projected
+/// radius fraction is at or above that threshold (the final level is fallback).
+#[derive(Clone, Copy, Debug)]
+pub struct LodLevel {
+    pub mesh: usize,
+    pub min_screen_fraction: f32,
 }
 
 /// glTF metallic-roughness PBR material. `*_image` fields index into `Scene::images`.
@@ -230,6 +282,8 @@ pub struct Material {
     pub roughness: f32,
     pub emissive: Vec3,
     pub normal_scale: f32,
+    /// Height scale for folder-loaded displacement maps, in UV-scaled units.
+    pub height_scale: f32,
     pub occlusion_strength: f32,
     pub alpha_mode: AlphaMode,
     pub alpha_cutoff: f32,
@@ -240,6 +294,8 @@ pub struct Material {
     pub metallic_roughness_image: Option<usize>,
     /// Linear, +Y up (OpenGL / glTF convention).
     pub normal_image: Option<usize>,
+    /// Linear height/displacement map used for parallax occlusion mapping.
+    pub height_image: Option<usize>,
     /// Linear. Ambient occlusion in the R channel.
     pub occlusion_image: Option<usize>,
     /// sRGB.
@@ -255,6 +311,9 @@ impl Default for Material {
             roughness: 0.5,
             emissive: Vec3::ZERO,
             normal_scale: 1.0,
+            // Conservative default: large parallax offsets make surfaces shear
+            // visibly at grazing angles, especially on repeating ground maps.
+            height_scale: 0.025,
             occlusion_strength: 1.0,
             alpha_mode: AlphaMode::Opaque,
             alpha_cutoff: 0.5,
@@ -262,6 +321,7 @@ impl Default for Material {
             base_color_image: None,
             metallic_roughness_image: None,
             normal_image: None,
+            height_image: None,
             occlusion_image: None,
             emissive_image: None,
         }
@@ -320,17 +380,67 @@ pub struct MeshInstance {
     pub transform: Mat4,
 }
 
+/// A transient transparent draw with an optional per-instance base-color
+/// override. Useful for effects that need smooth color and opacity changes
+/// without allocating a separate material for every particle.
+#[derive(Clone, Debug)]
+pub struct DynamicDraw {
+    pub mesh: usize,
+    pub material: usize,
+    pub transform: Mat4,
+    pub base_color_factor: Option<Vec4>,
+}
+
+impl From<MeshInstance> for DynamicDraw {
+    fn from(instance: MeshInstance) -> Self {
+        Self {
+            mesh: instance.mesh,
+            material: instance.material,
+            transform: instance.transform,
+            base_color_factor: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     pub meshes: Vec<MeshData>,
     pub images: Vec<ImageData>,
     pub materials: Vec<Material>,
     pub instances: Vec<MeshInstance>,
+    /// Mesh LOD chains, indexed by the mesh used in a MeshInstance.
+    pub mesh_lods: std::collections::HashMap<usize, Vec<LodLevel>>,
     pub lights: Vec<Light>,
     pub environment: Option<EnvironmentMap>,
 }
 
 impl Scene {
+    pub fn set_mesh_lods(&mut self, base_mesh: usize, levels: Vec<LodLevel>) -> Result<()> {
+        if base_mesh >= self.meshes.len() || levels.is_empty() {
+            bail!("LOD chain needs an existing base mesh and at least one level");
+        }
+        let mut previous = f32::INFINITY;
+        for level in &levels {
+            if level.mesh >= self.meshes.len()
+                || !level.min_screen_fraction.is_finite()
+                || level.min_screen_fraction <= 0.0
+                || level.min_screen_fraction >= previous
+            {
+                bail!("LOD levels need valid meshes and descending positive screen thresholds");
+            }
+            previous = level.min_screen_fraction;
+        }
+        self.mesh_lods.insert(base_mesh, levels);
+        Ok(())
+    }
+
+    pub fn select_lod(&self, mesh: usize, screen_fraction: f32) -> usize {
+        let Some(levels) = self.mesh_lods.get(&mesh) else { return mesh };
+        levels.iter()
+            .find(|level| screen_fraction >= level.min_screen_fraction)
+            .map_or_else(|| levels.last().unwrap().mesh, |level| level.mesh)
+    }
+
     pub fn add_mesh(&mut self, mesh: MeshData) -> usize {
         self.meshes.push(mesh);
         self.meshes.len() - 1
@@ -450,6 +560,9 @@ impl Scene {
             }
             mat.normal_image = Some(idx);
         }
+        if let Some((_, p)) = pick(|s| matches!(s, Slot::Height)) {
+            mat.height_image = Some(self.add_image_file(&p)?);
+        }
         if let Some((_, p)) = pick(|s| matches!(s, Slot::Emissive)) {
             mat.emissive_image = Some(self.add_image_file(&p)?);
             mat.emissive = Vec3::ONE;
@@ -515,6 +628,7 @@ impl Scene {
 enum Slot {
     Base,
     Normal { flip_green: bool },
+    Height,
     Roughness,
     Metallic,
     Ao,
@@ -535,6 +649,8 @@ fn classify(stem: &str) -> Option<Slot> {
         Some(Slot::Normal {
             flip_green: has(&["dx", "normaldx", "directx"]),
         })
+    } else if has(&["displacement", "height", "heightmap", "disp"]) {
+        Some(Slot::Height)
     } else if has(&["roughness", "rough", "rgh"]) {
         Some(Slot::Roughness)
     } else if has(&["metallic", "metalness", "metal", "met"]) {

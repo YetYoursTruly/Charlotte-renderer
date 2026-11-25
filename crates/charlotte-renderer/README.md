@@ -1,13 +1,13 @@
-# Charlotte
+# charlotte-renderer
 
 Charlotte is a Direct3D 12-first PBR renderer for Rust. It provides scene,
 camera, material and renderer APIs, with optional glTF/GLB loading.
 
-Once Charlotte is published to crates.io, add it to an application with:
+Add the published Charlotte beta to an application with:
 
 ```toml
 [dependencies]
-charlotte = { package = "charlotte-renderer", version = "0.1.0-beta.2" }
+charlotte-renderer = "0.1.0-beta.2"
 ```
 
 The facade crate re-exports the core types and offers the `gltf` module by

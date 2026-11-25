@@ -1,4 +1,4 @@
-# Charlotte (beta)
+# charlotte-renderer (beta)
 
 A Direct3D 12-first PBR renderer for Rust with DXR ray tracing, glTF (Blender) loading and an
 experimental Vulkan backend.
@@ -8,15 +8,15 @@ experimental Vulkan backend.
 
 ## Install from crates.io
 
-After the first release is published, applications will be able to add the facade crate with:
+Applications can add the published beta facade crate with:
 
 ```toml
 [dependencies]
-charlotte = { package = "charlotte-renderer", version = "0.1.0-beta.2" }
+charlotte-renderer = "0.1.0-beta.2"
 ```
 
-In Rust code, use the lowercase crate name: `charlotte`. The workspace crates must be published
-before the facade crate because it depends on them.
+In Rust code, import `charlotte_renderer`. The renderer facade package and directory are both named
+`charlotte-renderer`; internal backend and core crates retain their separate names.
 
 On Windows, the D3D12 dependency downloads Microsoft's pinned DXC NuGet runtime during the first
 build and copies `dxcompiler.dll` and `dxil.dll` next to the Cargo-built executable. No manual DLL
@@ -27,7 +27,7 @@ folder to use a local copy instead.
 
 | crate | what it does |
 |---|---|
-| `charlotte` | facade: `create_renderer(Backend::Auto, ..)`, re-exports everything. On Windows `Auto` selects D3D12 and does not silently fall back to Vulkan. Add this to your `Cargo.toml`. |
+| `charlotte-renderer` | facade: `create_renderer(Backend::Auto, ..)`, re-exports everything. On Windows `Auto` selects D3D12 and does not silently fall back to Vulkan. Import it as `charlotte_renderer`. |
 | `charlotte_core` | scene, materials, lights, camera, settings, `Renderer` trait, easy PBR folder loader |
 | `charlotte_gltf` | `.gltf` / `.glb` loader (Blender exports), incl. `KHR_lights_punctual` |
 | `charlotte_d3d12` | **main backend**: forward PBR, capability-selected MSAA, DXR 1.1 ray-traced shadows + AO |
@@ -77,7 +77,8 @@ folder to use a local copy instead.
 
 * HDR environment IBL uses diffuse spherical harmonics and filtered equirectangular mip levels; GGX-prefiltered cubemaps, screen-space reflections and RT reflections are not implemented.
 * No screen-space SSAO/GTAO or denoiser. RT AO and soft RT shadows are only available on DXR 1.1 devices.
-* Alpha blending is rendered as alpha-mask. No skinning/animation, morph targets, KHR_texture_transform.
+* D3D12 alpha blending uses back-to-front instance sorting. No skinning/animation, morph targets,
+  KHR_texture_transform.
 * One frame in flight (waits for the GPU every frame), no culling, one draw call per instance, max 16 lights,
   and a fixed small ray-origin bias.
 * Static scenes only: the TLAS is built once in `load_scene`.
@@ -87,10 +88,10 @@ folder to use a local copy instead.
 ## Using it from your own app
 
 ```rust
-let handles = charlotte::WindowHandles { window, display, width, height }; // raw-window-handle 0.6
-let mut settings = charlotte::RenderSettings::default();
-let mut renderer = charlotte::create_renderer(charlotte::Backend::Auto, &handles, &settings)?;
-renderer.load_scene(&charlotte::gltf::load_gltf("model.glb")?)?;
+let handles = charlotte_renderer::WindowHandles { window, display, width, height }; // raw-window-handle 0.6
+let mut settings = charlotte_renderer::RenderSettings::default();
+let mut renderer = charlotte_renderer::create_renderer(charlotte_renderer::Backend::Auto, &handles, &settings)?;
+renderer.load_scene(&charlotte_renderer::gltf::load_gltf("model.glb")?)?;
 renderer.render(&camera, &settings)?; // every frame
 ```
 

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Result};
-use charlotte::glam::{Mat4, Vec3};
-use charlotte::{
+use charlotte_renderer::glam::{Mat4, Vec3};
+use charlotte_renderer::{
     Backend, Camera, EnvironmentMap, GpuPreference, Light, LightKind, Material, RenderSettings,
     Renderer, Scene, WindowHandles,
 };
@@ -128,8 +128,13 @@ fn parse_args() -> Result<Args> {
 
 fn demo_scene(pbr_dir: Option<&PathBuf>) -> Result<Scene> {
     let mut scene = Scene::default();
-    let sphere = scene.add_mesh(charlotte::uv_sphere(0.45, 48, 32));
-    let ground = scene.add_mesh(charlotte::plane(8.0, 8.0));
+    let sphere_mesh = if pbr_dir.is_some() {
+        charlotte_renderer::uv_sphere(0.45, 256, 128)
+    } else {
+        charlotte_renderer::uv_sphere(0.45, 48, 32)
+    };
+    let sphere = scene.add_mesh(sphere_mesh);
+    let ground = scene.add_mesh(charlotte_renderer::plane(8.0, 8.0));
     let ground_mat = scene.add_material(Material::solid([0.5, 0.5, 0.5], 0.0, 0.8));
     scene.add_instance(
         ground,
@@ -139,6 +144,10 @@ fn demo_scene(pbr_dir: Option<&PathBuf>) -> Result<Scene> {
 
     if let Some(dir) = pbr_dir {
         let mat = scene.add_pbr_material_from_dir(dir)?;
+        if let Some(height_index) = scene.materials[mat].height_image {
+            let height = scene.images[height_index].clone();
+            scene.meshes[sphere].displace_from_height(&height, 0.12);
+        }
         scene.add_instance(
             sphere,
             mat,
@@ -215,7 +224,7 @@ impl App {
         };
 
         let mut renderer =
-            charlotte::create_renderer(self.args.backend, &handles, &self.args.settings)?;
+            charlotte_renderer::create_renderer(self.args.backend, &handles, &self.args.settings)?;
 
         let info = renderer.adapter_info().clone();
 
@@ -476,7 +485,7 @@ fn main() -> Result<()> {
     let args = parse_args()?;
 
     let mut scene = match &args.model {
-        Some(path) => charlotte::gltf::load_gltf(path)?,
+        Some(path) => charlotte_renderer::gltf::load_gltf(path)?,
         None => demo_scene(args.pbr_dir.as_ref())?,
     };
     scene.environment = Some(match &args.environment {

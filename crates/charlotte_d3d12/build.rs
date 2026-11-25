@@ -91,23 +91,47 @@ fn download_and_extract(out_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
         return Ok(dll_dir);
     }
 
-    if !archive.is_file() {
-        println!(
-            "cargo:warning=Downloading Microsoft's DirectX Shader Compiler {} for this build",
-            DXC_VERSION
-        );
-        download_archive(&archive)?;
+    // Cargo may leave a truncated NuGet archive behind if a previous download
+    // was interrupted. Try the cached archive once, then discard it and fetch a
+    // fresh copy rather than failing every subsequent build on the same cache.
+    for attempt in 0..2 {
+        if !archive.is_file() {
+            println!(
+                "cargo:warning=Downloading Microsoft's DirectX Shader Compiler {} for this build",
+                DXC_VERSION
+            );
+            download_archive(&archive)?;
+        }
+
+        if package_dir.exists() {
+            fs::remove_dir_all(&package_dir)?;
+        }
+        fs::create_dir_all(&package_dir)?;
+        match extract_archive(&archive, &package_dir) {
+            Ok(()) if has_runtime(&dll_dir) => return Ok(dll_dir),
+            Ok(()) => {
+                return Err(format!(
+                    "Microsoft DXC NuGet package did not contain both runtime DLLs under {}",
+                    dll_dir.display()
+                )
+                .into());
+            }
+            Err(error) if attempt == 0 => {
+                println!(
+                    "cargo:warning=Cached DXC package was invalid ({error}); removing it and retrying the download"
+                );
+                fs::remove_file(&archive)?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "DXC package download could not be extracted after retry: {error}"
+                )
+                .into());
+            }
+        }
     }
-    fs::create_dir_all(&package_dir)?;
-    extract_archive(&archive, &package_dir)?;
-    if !has_runtime(&dll_dir) {
-        return Err(format!(
-            "Microsoft DXC NuGet package did not contain both runtime DLLs under {}",
-            dll_dir.display()
-        )
-        .into());
-    }
-    Ok(dll_dir)
+
+    unreachable!("DXC archive retry loop always returns or errors")
 }
 
 fn download_archive(destination: &Path) -> Result<(), Box<dyn Error>> {

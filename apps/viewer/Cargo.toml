@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-charlotte = { package = "charlotte-renderer", path = "../../crates/charlotte" }
+charlotte-renderer = { path = "../../crates/charlotte-renderer" }
 env_logger = "0.11"
 log.workspace = true
 winit = "0.30"

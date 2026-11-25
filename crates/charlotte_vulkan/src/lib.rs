@@ -15,6 +15,27 @@ use charlotte_core::{
     AdapterInfo, Camera, GpuPreference, GpuVendor, RenderSettings, Renderer, Scene, WindowHandles,
 };
 
+/// Parses and validates WGSL and emits Vulkan-ready SPIR-V. Keeping shader
+/// source in WGSL gives the Vulkan backend a compiler path without requiring
+/// an external GLSL compiler installation on end-user machines.
+fn compile_wgsl(source: &str) -> Result<Vec<u32>> {
+    let module = naga::front::wgsl::parse_str(source)
+        .map_err(|error| anyhow::anyhow!("WGSL parse failed: {}", error.emit_to_string(source)))?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|error| anyhow::anyhow!("WGSL validation failed: {error}"))?;
+    naga::back::spv::write_vec(
+        &module,
+        &info,
+        &naga::back::spv::Options::default(),
+        None,
+    )
+    .map_err(|error| anyhow::anyhow!("SPIR-V generation failed: {error}"))
+}
+
 pub struct VulkanRenderer {
     info: AdapterInfo,
     vsync: bool,

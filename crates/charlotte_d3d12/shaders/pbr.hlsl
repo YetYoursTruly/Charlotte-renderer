@@ -13,6 +13,8 @@
 #define FRAME_RT_SHADOWS 1
 #define FRAME_RT_AO 2
 #define DRAW_ALPHA_MASK 1
+#define DRAW_ALPHA_BLEND 2
+#define DRAW_ALPHA_DITHER 4
 
 struct Light {
     float3 position;  float range;
@@ -51,7 +53,8 @@ Texture2D<float4> texMetalRough: register(t2);
 Texture2D<float4> texNormal    : register(t3);
 Texture2D<float4> texEmissive  : register(t4);
 Texture2D<float4> texOcclusion : register(t5);
-Texture2D<float4> envMap       : register(t6);
+Texture2D<float4> texHeight    : register(t6);
+Texture2D<float4> envMap       : register(t7);
 SamplerState samp : register(s0);
 SamplerState envSampler : register(s1);
 
@@ -115,6 +118,15 @@ float3 tonemapACES(float3 x) {
     return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
 }
 
+float ditherThreshold(uint2 pixel) {
+    static const float bayer[16] = {
+        0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0
+    };
+    uint2 p = pixel & 3;
+    return (bayer[p.y * 4 + p.x] + 0.5) / 16.0;
+}
+
 float2 directionToLatLong(float3 d) {
     return float2(atan2(d.z, d.x) * (0.5 / PI) + 0.5, acos(clamp(d.y, -1.0, 1.0)) / PI);
 }
@@ -123,6 +135,12 @@ float3 sampleEnvironment(float3 d, float lod) {
     float2 uv = directionToLatLong(normalize(d));
     uv.y = saturate(uv.y);
     return envMap.SampleLevel(envSampler, uv, lod).rgb;
+}
+
+float2 parallaxOcclusionUv(float2 uv, float3 viewTS) {
+    // Height is applied to preview mesh vertices on the CPU. Keep UVs unchanged
+    // so the surface cannot shear or swim as the camera moves.
+    return uv;
 }
 
 float3 diffuseIrradianceSH(float3 n) {
@@ -234,29 +252,34 @@ float rtAmbientOcclusion(float3 P, float3 N, uint2 pixel) {
 #endif
 
 float4 PSMain(PSIn i, bool isFront : SV_IsFrontFace) : SV_Target {
-    float4 baseSample = texBase.Sample(samp, i.uv);
+    float3 N = normalize(i.nrm);
+    if (!isFront) N = -N;
+    float3 T = normalize(i.tan.xyz - N * dot(N, i.tan.xyz));
+    float3 B = cross(N, T) * i.tan.w;
+    float3 V = normalize(camPos - i.wpos);
+    float3 viewTS = float3(dot(V, T), dot(V, B), dot(V, N));
+    float2 materialUv = parallaxOcclusionUv(i.uv, viewTS);
+    float4 baseSample = texBase.Sample(samp, materialUv);
     float4 baseColor = baseSample * baseColorFactor;
     if ((drawFlags & DRAW_ALPHA_MASK) != 0) {
         clip(baseColor.a - alphaCutoff);
     }
+    if ((drawFlags & DRAW_ALPHA_DITHER) != 0) {
+        clip(baseColor.a - ditherThreshold((uint2)i.sv.xy));
+    }
 
-    float4 mr = texMetalRough.Sample(samp, i.uv);
+    float4 mr = texMetalRough.Sample(samp, materialUv);
     float roughness = clamp(mr.g * roughnessFactor, 0.045, 1.0);
     float metallic = saturate(mr.b * metallicFactor);
-    float ao = lerp(1.0, texOcclusion.Sample(samp, i.uv).r, occlusionStrength);
+    float ao = lerp(1.0, texOcclusion.Sample(samp, materialUv).r, occlusionStrength);
 
-    float3 N = normalize(i.nrm);
-    if (!isFront) N = -N;
     float3 Ngeo = N;
     if (i.tan.w != 0.0) {
-        float3 tn = texNormal.Sample(samp, i.uv).xyz * 2.0 - 1.0;
+        float3 tn = texNormal.Sample(samp, materialUv).xyz * 2.0 - 1.0;
         tn.xy *= normalScale;
-        float3 T = normalize(i.tan.xyz - N * dot(N, i.tan.xyz));
-        float3 B = cross(N, T) * i.tan.w;
         N = normalize(tn.x * T + tn.y * B + tn.z * N);
     }
 
-    float3 V = normalize(camPos - i.wpos);
     float NdotV = max(dot(N, V), 1e-4);
     float a = roughness * roughness;
     float3 diffuseColor = baseColor.rgb * (1.0 - metallic);
@@ -327,9 +350,10 @@ float4 PSMain(PSIn i, bool isFront : SV_IsFrontFace) : SV_Target {
             + hemiR * envF * (1.0 - roughness * 0.7) * specularAo;
     }
 
-    float3 emissive = emissiveFactor * texEmissive.Sample(samp, i.uv).rgb;
+    float3 emissive = emissiveFactor * texEmissive.Sample(samp, materialUv).rgb;
     color += emissive;
 
     color = tonemapACES(color * exposure);
-    return float4(color, 1.0); // RTV is *_SRGB, hardware applies the sRGB curve.
+    float alpha = (drawFlags & DRAW_ALPHA_BLEND) != 0 ? baseColor.a : 1.0;
+    return float4(color, alpha); // RTV is *_SRGB, hardware applies the sRGB curve.
 }

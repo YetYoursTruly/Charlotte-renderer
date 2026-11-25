@@ -13,13 +13,14 @@ mod shader;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::{size_of, ManuallyDrop};
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
-use charlotte_core::glam::Mat4;
+use charlotte_core::glam::{Mat4, Vec3};
 use charlotte_core::raw_window_handle::RawWindowHandle;
 use charlotte_core::{
-    default_sun, AdapterInfo, AlphaMode, Camera, GpuPreference, GpuVendor, Light, LightKind,
-    Material, RenderSettings, Renderer, Scene, WindowHandles,
+    default_sun, AdapterInfo, AlphaMode, Camera, DynamicDraw, GpuPreference, GpuVendor, Light,
+    LightKind, Material, MeshInstance, RenderSettings, Renderer, Scene, WindowHandles,
 };
 use windows::core::{s, Interface, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, RECT};
@@ -34,7 +35,7 @@ use gpu::*;
 const FRAME_COUNT: u32 = 2;
 const MAX_LIGHTS: usize = 16;
 const VERTEX_STRIDE: u32 = 48;
-const SRV_PER_MATERIAL: u32 = 5;
+const SRV_PER_MATERIAL: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -109,12 +110,15 @@ struct GpuMaterial {
     table: D3D12_GPU_DESCRIPTOR_HANDLE,
     draw: DrawConstants,
     double_sided: bool,
+    alpha_mode: AlphaMode,
 }
 
 struct GpuScene {
     meshes: Vec<GpuMesh>,
     materials: Vec<GpuMaterial>,
     instances: Vec<(usize, usize, Mat4)>,
+    mesh_lods: HashMap<usize, Vec<charlotte_core::LodLevel>>,
+    mesh_radii: Vec<f32>,
     srv_heap: ID3D12DescriptorHeap,
     _textures: Vec<ID3D12Resource>,
     tlas: Option<ID3D12Resource>,
@@ -126,12 +130,26 @@ struct GpuScene {
     environment_sh: [[f32; 4]; 9],
 }
 
+fn select_lod_mesh(scene: &GpuScene, mesh: usize, transform: Mat4, camera: &Camera) -> usize {
+    let Some(levels) = scene.mesh_lods.get(&mesh) else { return mesh };
+    let radius = scene.mesh_radii[mesh];
+    let scale = transform.x_axis.truncate().length()
+        .max(transform.y_axis.truncate().length())
+        .max(transform.z_axis.truncate().length());
+    let distance = transform.transform_point3(Vec3::ZERO).distance(camera.position).max(1e-4);
+    let fraction = radius * scale / (distance * (camera.fov_y * 0.5).tan());
+    levels.iter()
+        .find(|level| fraction >= level.min_screen_fraction)
+        .map_or_else(|| levels.last().unwrap().mesh, |level| level.mesh)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum TexKey {
     Image(usize, bool),
     WhiteSrgb,
     WhiteLinear,
     FlatNormal,
+    BlackLinear,
 }
 
 pub struct D3d12Renderer {
@@ -157,11 +175,14 @@ pub struct D3d12Renderer {
     root_sig: ID3D12RootSignature,
     pso_cull: ID3D12PipelineState,
     pso_no_cull: ID3D12PipelineState,
+    pso_blend: ID3D12PipelineState,
     frame_cb: ID3D12Resource,
     pso_sky: ID3D12PipelineState,
     width: u32,
     height: u32,
     scene: Option<GpuScene>,
+    dynamic_instances: Vec<DynamicDraw>,
+    start_time: Instant,
 }
 
 impl D3d12Renderer {
@@ -317,6 +338,7 @@ impl D3d12Renderer {
             D3D12_CULL_MODE_BACK,
             sample_count,
             false,
+            false,
         )?;
         let pso_no_cull = create_pso(
             &device,
@@ -326,6 +348,17 @@ impl D3d12Renderer {
             D3D12_CULL_MODE_NONE,
             sample_count,
             false,
+            false,
+        )?;
+        let pso_blend = create_pso(
+            &device,
+            &root_sig,
+            &vs,
+            &ps,
+            D3D12_CULL_MODE_NONE,
+            sample_count,
+            false,
+            true,
         )?;
         let sky_vs = shader::compile("SkyVS", "vs_6_0", false)?;
         let sky_ps = shader::compile("SkyPS", "ps_6_0", false)?;
@@ -337,6 +370,7 @@ impl D3d12Renderer {
             D3D12_CULL_MODE_NONE,
             sample_count,
             true,
+            false,
         )?;
 
         let cb_size = align_up(size_of::<FrameConstants>() as u64, 256);
@@ -371,11 +405,14 @@ impl D3d12Renderer {
             root_sig,
             pso_cull,
             pso_no_cull,
+            pso_blend,
             frame_cb,
             pso_sky,
             width,
             height,
             scene: None,
+            dynamic_instances: Vec::new(),
+            start_time: Instant::now(),
         };
         r.create_targets()?;
         Ok(r)
@@ -589,6 +626,7 @@ impl D3d12Renderer {
                 img(m.normal_image, false, TexKey::FlatNormal),
                 img(m.emissive_image, true, TexKey::WhiteSrgb),
                 img(m.occlusion_image, false, TexKey::WhiteLinear),
+                img(m.height_image, false, TexKey::BlackLinear),
             ];
             for (slot, key) in keys.iter().enumerate() {
                 let tex_index = match cache.get(key) {
@@ -602,6 +640,7 @@ impl D3d12Renderer {
                             TexKey::WhiteSrgb => (vec![255; 4], 1, 1, true),
                             TexKey::WhiteLinear => (vec![255; 4], 1, 1, false),
                             TexKey::FlatNormal => (vec![128, 128, 255, 255], 1, 1, false),
+                            TexKey::BlackLinear => (vec![0, 0, 0, 255], 1, 1, false),
                         };
                         let (res, mips) =
                             create_texture(&device, &list, w, h, &rgba, srgb, &mut keep)?;
@@ -643,12 +682,13 @@ impl D3d12Renderer {
                 normal_scale: m.normal_scale,
                 occlusion_strength: m.occlusion_strength,
                 alpha_cutoff: m.alpha_cutoff,
-                flags: if m.alpha_mode == AlphaMode::Opaque {
-                    0
-                } else {
-                    1
+                flags: match m.alpha_mode {
+                    AlphaMode::Opaque => 0,
+                    AlphaMode::Mask => 1,
+                    AlphaMode::Blend => 2,
+                    AlphaMode::Dithered => 4,
                 },
-                _pad: [0; 3],
+                _pad: [m.height_scale.to_bits(), 0, 0],
             };
             materials.push(GpuMaterial {
                 table: D3D12_GPU_DESCRIPTOR_HANDLE {
@@ -656,6 +696,7 @@ impl D3d12Renderer {
                 },
                 draw,
                 double_sided: m.double_sided,
+                alpha_mode: m.alpha_mode,
             });
         }
 
@@ -731,6 +772,10 @@ impl D3d12Renderer {
             meshes,
             materials,
             instances,
+            mesh_lods: scene.mesh_lods.clone(),
+            mesh_radii: scene.meshes.iter().map(|mesh| {
+                mesh.vertices.iter().map(|v| Vec3::from(v.position).length()).fold(0.0f32, f32::max)
+            }).collect(),
             srv_heap,
             _textures: textures.into_iter().map(|t| t.0).collect(),
             tlas,
@@ -771,6 +816,7 @@ impl D3d12Renderer {
         fc.ibl_strength = settings.ibl_strength;
         fc.shadow_samples = settings.rt_shadow_samples.clamp(1, 16);
         fc.shadow_softness = settings.rt_shadow_softness.max(0.0);
+        fc._pad = [self.start_time.elapsed().as_secs_f32().to_bits(), 0];
         if let Some(scene) = &self.scene {
             fc.env_sh = scene.environment_sh;
             fc.env_mips = scene.environment_mips.saturating_sub(1) as f32;
@@ -890,8 +936,12 @@ impl D3d12Renderer {
 
             let mut double_sided = false;
             for (mesh_i, mat_i, transform) in &scene.instances {
-                let mesh = &scene.meshes[*mesh_i];
+                let selected_mesh = select_lod_mesh(scene, *mesh_i, *transform, camera);
+                let mesh = &scene.meshes[selected_mesh];
                 let mat = &scene.materials[*mat_i];
+                if mat.alpha_mode == AlphaMode::Blend {
+                    continue;
+                }
                 if mat.double_sided != double_sided {
                     double_sided = mat.double_sided;
                     list.SetPipelineState(if double_sided {
@@ -918,6 +968,65 @@ impl D3d12Renderer {
                     Format: DXGI_FORMAT_R32_UINT,
                 }));
                 list.DrawIndexedInstanced(mesh.index_count, 1, 0, 0, 0);
+            }
+
+            // Alpha-blended geometry is sorted back-to-front and rendered after opaque objects.
+            // Transient effect instances are intentionally excluded from the static TLAS.
+            let mut transparent: Vec<(usize, usize, Mat4, f32, Option<[f32; 4]>)> = scene
+                .instances
+                .iter()
+                .filter_map(|(mesh, material, transform)| {
+                    (scene.materials[*material].alpha_mode == AlphaMode::Blend).then_some((
+                        select_lod_mesh(scene, *mesh, *transform, camera),
+                        *material,
+                        *transform,
+                        transform
+                            .transform_point3(Vec3::ZERO)
+                            .distance_squared(camera.position),
+                        None,
+                    ))
+                })
+                .collect();
+            transparent.extend(self.dynamic_instances.iter().map(|instance| {
+                (
+                    instance.mesh,
+                    instance.material,
+                    instance.transform,
+                    instance
+                        .transform
+                        .transform_point3(Vec3::ZERO)
+                        .distance_squared(camera.position),
+                    instance.base_color_factor.map(|color| color.to_array()),
+                )
+            }));
+            transparent.sort_by(|a, b| b.3.total_cmp(&a.3));
+            if !transparent.is_empty() {
+                list.SetPipelineState(&self.pso_blend);
+                for (mesh_i, mat_i, transform, _, color_factor) in transparent {
+                    let mesh = &scene.meshes[mesh_i];
+                    let mat = &scene.materials[mat_i];
+                    let mut dc = mat.draw;
+                    dc.model = transform.to_cols_array();
+                    if let Some(color_factor) = color_factor {
+                        dc.base_color = color_factor;
+                    }
+                    list.SetGraphicsRoot32BitConstants(2, 32, &dc as *const _ as *const c_void, 0);
+                    list.SetGraphicsRootDescriptorTable(3, mat.table);
+                    list.IASetVertexBuffers(
+                        0,
+                        Some(&[D3D12_VERTEX_BUFFER_VIEW {
+                            BufferLocation: mesh.vb.GetGPUVirtualAddress(),
+                            SizeInBytes: mesh.vertex_bytes,
+                            StrideInBytes: VERTEX_STRIDE,
+                        }]),
+                    );
+                    list.IASetIndexBuffer(Some(&D3D12_INDEX_BUFFER_VIEW {
+                        BufferLocation: mesh.ib.GetGPUVirtualAddress(),
+                        SizeInBytes: mesh.index_count * 4,
+                        Format: DXGI_FORMAT_R32_UINT,
+                    }));
+                    list.DrawIndexedInstanced(mesh.index_count, 1, 0, 0, 0);
+                }
             }
         }
 
@@ -969,6 +1078,7 @@ impl Renderer for D3d12Renderer {
         unsafe {
             self.wait_idle()?;
             self.scene = None;
+            self.dynamic_instances.clear();
             self.load_scene_inner(scene)
         }
     }
@@ -994,6 +1104,44 @@ impl Renderer for D3d12Renderer {
             )?;
             self.create_targets()
         }
+    }
+
+    fn set_dynamic_instances(&mut self, instances: &[MeshInstance]) -> Result<()> {
+        let draws: Vec<_> = instances.iter().cloned().map(DynamicDraw::from).collect();
+        self.set_dynamic_draws(&draws)
+    }
+
+    fn set_dynamic_draws(&mut self, draws: &[DynamicDraw]) -> Result<()> {
+        let scene = self
+            .scene
+            .as_ref()
+            .context("load a scene before setting dynamic instances")?;
+        for (index, instance) in draws.iter().enumerate() {
+            let material = scene.materials.get(instance.material).with_context(|| {
+                format!(
+                    "dynamic draw {index} refers to missing material {}",
+                    instance.material
+                )
+            })?;
+            if instance.mesh >= scene.meshes.len() {
+                bail!(
+                    "dynamic draw {index} refers to missing mesh {}",
+                    instance.mesh
+                );
+            }
+            if material.alpha_mode != AlphaMode::Blend {
+                bail!("dynamic draw {index} must use an alpha-blended material");
+            }
+            if instance
+                .base_color_factor
+                .is_some_and(|color| !color.is_finite())
+            {
+                bail!("dynamic draw {index} has a non-finite color override");
+            }
+        }
+        self.dynamic_instances.clear();
+        self.dynamic_instances.extend_from_slice(draws);
+        Ok(())
     }
 
     fn render(&mut self, camera: &Camera, settings: &RenderSettings) -> Result<()> {
@@ -1053,7 +1201,7 @@ unsafe fn create_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSigna
     let environment_range = D3D12_DESCRIPTOR_RANGE {
         RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
         NumDescriptors: 1,
-        BaseShaderRegister: 6,
+        BaseShaderRegister: 7,
         RegisterSpace: 0,
         OffsetInDescriptorsFromTableStart: D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND,
     };
@@ -1186,6 +1334,7 @@ unsafe fn create_pso(
     cull: D3D12_CULL_MODE,
     sample_count: u32,
     sky: bool,
+    alpha_blend: bool,
 ) -> Result<ID3D12PipelineState> {
     let elements = [
         input_element(s!("POSITION"), DXGI_FORMAT_R32G32B32_FLOAT, 0),
@@ -1194,13 +1343,25 @@ unsafe fn create_pso(
         input_element(s!("TEXCOORD"), DXGI_FORMAT_R32G32_FLOAT, 40),
     ];
     let rt_blend = D3D12_RENDER_TARGET_BLEND_DESC {
-        BlendEnable: false.into(),
+        BlendEnable: alpha_blend.into(),
         LogicOpEnable: false.into(),
-        SrcBlend: D3D12_BLEND_ONE,
-        DestBlend: D3D12_BLEND_ZERO,
+        SrcBlend: if alpha_blend {
+            D3D12_BLEND_SRC_ALPHA
+        } else {
+            D3D12_BLEND_ONE
+        },
+        DestBlend: if alpha_blend {
+            D3D12_BLEND_INV_SRC_ALPHA
+        } else {
+            D3D12_BLEND_ZERO
+        },
         BlendOp: D3D12_BLEND_OP_ADD,
         SrcBlendAlpha: D3D12_BLEND_ONE,
-        DestBlendAlpha: D3D12_BLEND_ZERO,
+        DestBlendAlpha: if alpha_blend {
+            D3D12_BLEND_INV_SRC_ALPHA
+        } else {
+            D3D12_BLEND_ZERO
+        },
         BlendOpAlpha: D3D12_BLEND_OP_ADD,
         LogicOp: D3D12_LOGIC_OP_NOOP,
         RenderTargetWriteMask: D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8,
@@ -1242,7 +1403,7 @@ unsafe fn create_pso(
         },
         DepthStencilState: D3D12_DEPTH_STENCIL_DESC {
             DepthEnable: (!sky).into(),
-            DepthWriteMask: if sky {
+            DepthWriteMask: if sky || alpha_blend {
                 D3D12_DEPTH_WRITE_MASK_ZERO
             } else {
                 D3D12_DEPTH_WRITE_MASK_ALL
